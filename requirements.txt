@@ -1,4 +1,4 @@
-python-telegram-bot==20.5
+python-telegram-bot==20.3
 PyPDF2==3.0.1
 Pillow==11.3.0
 reportlab==4.4.4
