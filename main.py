@@ -2,6 +2,7 @@ import os
 import tempfile
 import shutil
 import logging
+import threading
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -230,7 +231,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(chat_id=update.effective_chat.id, document=split_fid,
                                                 caption=f"Split page from your PDF")
 
-            session["pdfs"] = split_fids  # Only keep the latest split PDFs
+            session["pdfs"] = split_fids
             await update.message.reply_text(f"✅ PDF split into {len(split_fids)} pages.")
         finally:
             try: shutil.rmtree(tmp_dir)
@@ -243,7 +244,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ You have no PDFs to extract text from.")
             return
 
-        fid = session["pdfs"][-1]  # Latest PDF
+        fid = session["pdfs"][-1]
         tmp_dir = tempfile.mkdtemp(prefix=f"extract_{user_id}_")
         try:
             pdf_path = os.path.join(tmp_dir, "pdf.pdf")
@@ -263,7 +264,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ You have no PDFs to convert.")
             return
 
-        fid = session["pdfs"][-1] 
+        fid = session["pdfs"][-1]
         tmp_dir = tempfile.mkdtemp(prefix=f"word_{user_id}_")
         try:
             pdf_path = os.path.join(tmp_dir, "pdf.pdf")
@@ -349,8 +350,25 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if doc.mime_type == "application/pdf":
         await pdf_handler(update, context)
 
-# ------------------------ App setup ----------------
+# ------------------------ FastAPI server (for Render) ------------------------
+from fastapi import FastAPI
+import uvicorn
+
+fastapi_app = FastAPI()
+
+@fastapi_app.get("/")
+async def root():
+    return {"status": "Bot is running"}
+
+def run_fastapi():
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+# ------------------------ App setup ------------------------
 def main():
+    # Start FastAPI server in a separate thread
+    threading.Thread(target=run_fastapi, daemon=True).start()
+
+    # Start Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
