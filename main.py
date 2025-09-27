@@ -5,12 +5,12 @@ import logging
 from dotenv import load_dotenv
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from fastapi import FastAPI, Request
 from reportlab.pdfgen import canvas
 from PIL import Image
 from PyPDF2 import PdfReader, PdfWriter
 import pdfplumber
 from docx import Document
-from fastapi import FastAPI, Request
 
 # ------------------------
 # CONFIG
@@ -18,9 +18,10 @@ from fastapi import FastAPI, Request
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID")) if os.getenv("CHANNEL_ID") else None
+RENDER_URL = os.getenv("RENDER_URL")  # e.g., https://pdftoolkit-bot.onrender.com
 
-if not BOT_TOKEN or not CHANNEL_ID:
-    raise SystemExit("Please set BOT_TOKEN and CHANNEL_ID in .env (CHANNEL_ID must include -100 prefix)")
+if not BOT_TOKEN or not CHANNEL_ID or not RENDER_URL:
+    raise SystemExit("Please set BOT_TOKEN, CHANNEL_ID, and RENDER_URL in .env")
 
 # ------------------------
 # Logging
@@ -29,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------
-# User sessions
+# Sessions
 # ------------------------
 user_sessions = {}
 
@@ -42,16 +43,13 @@ def ensure_user_session(user_id):
     return s
 
 # ------------------------
-# PDF / Image utilities
+# PDF / Image Helpers
 # ------------------------
-async def download_file(bot, file_id, dest_path):
-    try:
-        file_obj = await bot.get_file(file_id)
-        await file_obj.download_to_drive(dest_path)
-    except Exception as e:
-        logger.error(f"Failed to download file: {e}")
+async def download_pdf(bot, file_id, dest_path):
+    file_obj = await bot.get_file(file_id)
+    await file_obj.download_to_drive(dest_path)
 
-def images_to_pdf(image_paths, pdf_path):
+def images_to_pdf_reportlab(image_paths, pdf_path):
     c = canvas.Canvas(pdf_path)
     for img_path in image_paths:
         img = Image.open(img_path)
@@ -69,19 +67,6 @@ def merge_pdfs(paths, output_path):
             writer.add_page(page)
     with open(output_path, "wb") as f:
         writer.write(f)
-
-def split_pdf(path, pages, output_dir):
-    reader = PdfReader(path)
-    output_files = []
-    for i, page in enumerate(reader.pages):
-        if i+1 in pages:
-            writer = PdfWriter()
-            writer.add_page(page)
-            out_file = os.path.join(output_dir, f"page_{i+1}.pdf")
-            with open(out_file, "wb") as f:
-                writer.write(f)
-            output_files.append(out_file)
-    return output_files
 
 def extract_text_from_pdf(path):
     text = ""
@@ -107,7 +92,8 @@ MAIN_BUTTONS = ReplyKeyboardMarkup(
         [KeyboardButton("🔍 Extract Text"), KeyboardButton("📝 PDF → Word")],
         [KeyboardButton("🛑 Cancel")]
     ],
-    resize_keyboard=True
+    resize_keyboard=True,
+    one_time_keyboard=False
 )
 
 # ------------------------
@@ -116,7 +102,7 @@ MAIN_BUTTONS = ReplyKeyboardMarkup(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_session(update.message.from_user.id)
     await update.message.reply_text(
-        "👋 Welcome to PDFTools.\nUse the buttons below to interact.",
+        "👋 Welcome to PDFTools bot.\nUse the buttons below to interact.",
         reply_markup=MAIN_BUTTONS
     )
 
@@ -146,10 +132,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             paths = []
             for idx, file_id in enumerate(session["images"], start=1):
                 local_path = os.path.join(tmp_dir, f"{idx}.jpg")
-                await download_file(context.bot, file_id, local_path)
+                await download_pdf(context.bot, file_id, local_path)
                 paths.append(local_path)
             output_pdf = os.path.join(tmp_dir, "output.pdf")
-            images_to_pdf(paths, output_pdf)
+            images_to_pdf_reportlab(paths, output_pdf)
             with open(output_pdf, "rb") as f:
                 msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f)
                 pdf_id = msg.document.file_id
@@ -159,6 +145,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_document(chat_id=update.effective_chat.id, document=pdf_id)
         finally:
             shutil.rmtree(tmp_dir)
+        return
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -191,35 +178,41 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Image saved. Send more or press 📄 Create PDF.")
 
 # ------------------------
-# FastAPI + Webhook
+# FastAPI + Telegram setup
 # ------------------------
 fastapi_app = FastAPI()
 bot = Bot(BOT_TOKEN)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
-@fastapi_app.post(f"/webhook/{BOT_TOKEN}")
+# Webhook route
+@fastapi_app.post("/webhook")
 async def telegram_webhook(req: Request):
     data = await req.json()
+    logger.info(f"Received update: {data}")
     update = Update.de_json(data, bot)
     await application.update_queue.put(update)
     return {"ok": True}
 
+# Health check
 @fastapi_app.get("/")
 async def root():
     return {"status": "Bot is running"}
 
+# Set webhook on startup
 @fastapi_app.on_event("startup")
 async def on_startup():
-    url = f"https://pdftoolkit-bot.onrender.com/webhook/{BOT_TOKEN}"
-    await bot.set_webhook(url)
-    logger.info(f"Webhook set to {url}")
+    webhook_url = f"{RENDER_URL}/webhook"
+    await bot.set_webhook(webhook_url)
+    logger.info(f"Webhook set to {webhook_url}")
 
+# ------------------------
+# Run FastAPI
+# ------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
