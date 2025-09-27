@@ -3,8 +3,7 @@ import tempfile
 import shutil
 import logging
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, Bot
-from telegram.constants import ChatAction
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ChatAction, Bot
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from reportlab.pdfgen import canvas
 from PIL import Image
@@ -12,6 +11,7 @@ from PyPDF2 import PdfReader, PdfWriter
 import pdfplumber
 from docx import Document
 from fastapi import FastAPI, Request
+import asyncio
 
 # ------------------------
 # CONFIG
@@ -42,6 +42,9 @@ def ensure_user_session(user_id):
     s.setdefault("collecting_pdfs", False)
     return s
 
+# ------------------------
+# PDF / Image helpers
+# ------------------------
 # ------------------------
 # PDF / Image helpers
 # ------------------------
@@ -118,76 +121,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=MAIN_BUTTONS
     )
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    text = (update.message.text or "").strip()
-    session = ensure_user_session(user_id)
-
-    if text == "🛑 Cancel":
-        session.clear()
-        await update.message.reply_text("🗑️ Session cleared.")
-        return
-
-    if text == "🖼️ Add Image":
-        session["collecting_images"] = True
-        session["images"] = []
-        await update.message.reply_text("📸 Send images now.")
-        return
-
-    if text == "📄 Create PDF":
-        if not session.get("images"):
-            await update.message.reply_text("⚠️ No images. Press 🖼️ Add Image first.")
-            return
-        await update.message.reply_text("⏳ Creating PDF...")
-        tmp_dir = tempfile.mkdtemp()
-        try:
-            paths = []
-            for idx, file_id in enumerate(session["images"], start=1):
-                local_path = os.path.join(tmp_dir, f"{idx}.jpg")
-                await download_pdf(context.bot, file_id, local_path)
-                paths.append(local_path)
-            output_pdf = os.path.join(tmp_dir, "output.pdf")
-            images_to_pdf_reportlab(paths, output_pdf)
-            with open(output_pdf, "rb") as f:
-                msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f)
-                pdf_id = msg.document.file_id
-            session["pdfs"] = [pdf_id]
-            session["images"] = []
-            session["collecting_images"] = False
-            await context.bot.send_document(chat_id=update.effective_chat.id, document=pdf_id)
-        finally:
-            shutil.rmtree(tmp_dir)
-        return
-
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    session = ensure_user_session(user_id)
-    if not session.get("collecting_images"):
-        await update.message.reply_text("⚠️ Click 🖼️ Add Image first.")
-        return
-    photo = update.message.photo[-1]
-    msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo.file_id)
-    session.setdefault("images", []).append(msg.photo[-1].file_id)
-    await update.message.reply_text("✅ Image saved. Send more or press 📄 Create PDF.")
-
-async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    session = ensure_user_session(user_id)
-    doc = update.message.document
-    if not doc:
-        return
-    if doc.mime_type == "application/pdf":
-        msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=doc.file_id)
-        session["pdfs"] = [msg.document.file_id]
-        session["collecting_pdfs"] = False
-        await update.message.reply_text("✅ PDF saved!")
-    elif doc.mime_type in ["image/jpeg", "image/png"]:
-        if not session.get("collecting_images"):
-            await update.message.reply_text("⚠️ Click 🖼️ Add Image first.")
-            return
-        msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=doc.file_id)
-        session.setdefault("images", []).append(msg.document.file_id)
-        await update.message.reply_text("✅ Image saved. Send more or press 📄 Create PDF.")
+# Reuse your text_handler, photo_handler, document_handler from previous code here
+# Make sure they use 'context.bot' and session management as before
 
 # ------------------------
 # FastAPI + Webhook setup
@@ -196,6 +131,7 @@ fastapi_app = FastAPI()
 bot = Bot(BOT_TOKEN)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 
+# Register handlers
 application.add_handler(CommandHandler("start", start))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
@@ -208,37 +144,20 @@ async def telegram_webhook(req: Request):
     await application.update_queue.put(update)
     return {"ok": True}
 
-@fastapi_app.post("/")
-async def root(): 
-    return {"status" : "Bot is running"}
-
 @fastapi_app.get("/")
 async def root():
     return {"status": "Bot is running"}
 
 @fastapi_app.on_event("startup")
 async def on_startup():
+    # Set Telegram webhook to Render URL
     url = f"https://pdftoolkit-bot.onrender.com/webhook/{BOT_TOKEN}"
     await bot.set_webhook(url)
     logger.info(f"Webhook set to {url}")
 
+# ------------------------
+# Run with uvicorn
+# ------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-
-# ------------------------ App setup ------------------------
-def main():
-    
-    threading.Thread(target=run_fastapi, daemon=True).start()
-
-    
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
-    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))  
-    logger.info("Bot started with PDF & image functionalities + channel storage")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
