@@ -115,7 +115,7 @@ MAIN_BUTTONS = ReplyKeyboardMarkup(
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_session(update.message.from_user.id)
     await update.message.reply_text(
-        "👋 Welcome to PDF-Toolkit.\nUse the buttons below to interact.",
+        "👋 Welcome to PDFTools.\nUse the buttons below to interact.",
         reply_markup=MAIN_BUTTONS
     )
 
