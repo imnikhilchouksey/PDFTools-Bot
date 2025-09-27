@@ -216,7 +216,7 @@ async def root():
 
 @fastapi_app.on_event("startup")
 async def on_startup():
-    url = f"https://YOUR-DEPLOYED-URL.com/webhook/{BOT_TOKEN}"
+    url = f"https://pdftoolkit-bot.onrender.com/webhook/{BOT_TOKEN}"
     await bot.set_webhook(url)
     logger.info(f"Webhook set to {url}")
 
