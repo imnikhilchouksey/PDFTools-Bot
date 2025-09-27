@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ------------------------
-# In-memory sessions
+# User sessions
 # ------------------------
 user_sessions = {}
 
@@ -49,7 +49,7 @@ async def download_pdf(bot, file_id, dest_path):
     file_obj = await bot.get_file(file_id)
     await file_obj.download_to_drive(dest_path)
 
-def images_to_pdf_reportlab(image_paths, pdf_path):
+def images_to_pdf(image_paths, pdf_path):
     c = canvas.Canvas(pdf_path)
     for img_path in image_paths:
         img = Image.open(img_path)
@@ -105,8 +105,7 @@ MAIN_BUTTONS = ReplyKeyboardMarkup(
         [KeyboardButton("🔍 Extract Text"), KeyboardButton("📝 PDF → Word")],
         [KeyboardButton("🛑 Cancel")]
     ],
-    resize_keyboard=True,
-    one_time_keyboard=False
+    resize_keyboard=True
 )
 
 # ------------------------
@@ -209,6 +208,10 @@ async def telegram_webhook(req: Request):
     await application.update_queue.put(update)
     return {"ok": True}
 
+@fastapi_app.post("/")
+async def root(): 
+    return {"status" : "Bot is running"}
+
 @fastapi_app.get("/")
 async def root():
     return {"status": "Bot is running"}
@@ -222,3 +225,20 @@ async def on_startup():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
+# ------------------------ App setup ------------------------
+def main():
+    
+    threading.Thread(target=run_fastapi, daemon=True).start()
+
+    
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))  
+    logger.info("Bot started with PDF & image functionalities + channel storage")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
