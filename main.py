@@ -356,6 +356,10 @@ import uvicorn
 
 fastapi_app = FastAPI()
 
+@fastapi_app.post("/")
+async def root(): 
+    return {"status" : "Bot is running"}
+
 @fastapi_app.get("/")
 async def root():
     return {"status": "Bot is running"}
@@ -365,10 +369,10 @@ def run_fastapi():
 
 # ------------------------ App setup ------------------------
 def main():
-    # Start FastAPI server in a separate thread
+    
     threading.Thread(target=run_fastapi, daemon=True).start()
 
-    # Start Telegram bot
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
