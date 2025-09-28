@@ -203,12 +203,23 @@ async def telegram_webhook(req: Request):
 async def root():
     return {"status": "Bot is running"}
 
-# Set webhook on startup
 @fastapi_app.on_event("startup")
 async def on_startup():
     webhook_url = f"{RENDER_URL}/webhook"
     await bot.set_webhook(webhook_url)
     logger.info(f"Webhook set to {webhook_url}")
+
+    # 🚀 Start telegram application in background
+    await application.start()
+    await application.updater.start_polling()  # important to process queue
+
+
+@fastapi_app.on_event("shutdown")
+async def on_shutdown():
+    # 🛑 Stop telegram application cleanly
+    await application.updater.stop()
+    await application.stop()
+
 
 # ------------------------
 # Run FastAPI
