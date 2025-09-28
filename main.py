@@ -41,8 +41,8 @@ application = Application.builder().token(BOT_TOKEN).build()
 user_sessions = {}
 def ensure_user_session(user_id: int):
     s = user_sessions.setdefault(user_id, {})
-    s.setdefault("images", [])
-    s.setdefault("pdfs", [])
+    s.setdefault("images", [])       # list of file_ids (photo/document)
+    s.setdefault("pdfs", [])         # list of pdf file_ids
     s.setdefault("collecting_images", False)
     s.setdefault("collecting_pdfs", False)
     return s
@@ -131,6 +131,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🖼️ Add Image":
         session["collecting_images"] = True
+        session["images"] = []
         await update.message.reply_text("📸 Send images now (as photos or image files).")
         return
 
@@ -148,13 +149,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 paths.append(local_path)
             output_pdf = os.path.join(tmp_dir, "output.pdf")
             images_to_pdf_reportlab(paths, output_pdf)
-            # send to user
             with open(output_pdf, "rb") as f:
                 await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
-            # upload to channel
             with open(output_pdf, "rb") as f2:
                 msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
-            session["pdfs"].append(msg.document.file_id)
+            session["pdfs"] = [msg.document.file_id]
             session["images"] = []
             session["collecting_images"] = False
         finally:
@@ -163,7 +162,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "📥 Add PDF":
         session["collecting_pdfs"] = True
-        await update.message.reply_text("📁 Send PDF files now. You can send multiple PDFs one by one.")
+        await update.message.reply_text("📁 Send PDF file now.")
         return
 
     if text == "🔗 Merge PDFs":
@@ -203,11 +202,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             parts = [p.strip() for p in text.split(",")]
             for part in parts:
-                s,e = part.split("-")
-                ranges.append((int(s), int(e)))
+                if "-" not in part:
+                    continue
+                s, e = part.split("-")
+                s, e = int(s), int(e)
+                if s > e:
+                    s, e = e, s
+                ranges.append((s, e))
         except Exception:
             await update.message.reply_text("⚠️ Invalid format. Use like: 1-2 or 1-2,3-4")
             return
+
+        if not session.get("pdfs"):
+            await update.message.reply_text("⚠️ No PDF in session. Send one first (📥 Add PDF).")
+            return
+
         await update.message.reply_text("⏳ Splitting PDF...")
         tmp_dir = tempfile.mkdtemp()
         try:
@@ -220,9 +229,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 with open(outp, "rb") as f:
                     await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
                 with open(outp, "rb") as f2:
-                    m = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
-                    uploaded.append(m.document.file_id)
+                    msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
+                    uploaded.append(msg.document.file_id)
             session["pdfs"] = uploaded
+            await update.message.reply_text(f"✅ Split into {len(uploaded)} PDFs successfully.")
         finally:
             shutil.rmtree(tmp_dir)
         return
@@ -265,7 +275,6 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(tmp_dir)
         return
 
-    # fallback
     await update.message.reply_text("Use the keyboard buttons or /start.", reply_markup=MAIN_BUTTONS)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -286,12 +295,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         return
     mt = (doc.mime_type or "").lower()
-
     if mt == "application/pdf":
         msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=doc.file_id)
-        session.setdefault("pdfs", []).append(msg.document.file_id)
+        session["pdfs"] = [msg.document.file_id]
         session["collecting_pdfs"] = False
-        await update.message.reply_text(f"✅ PDF saved. You now have {len(session['pdfs'])} PDFs in session.")
+        await update.message.reply_text("✅ PDF saved to session.")
     elif mt in ["image/jpeg", "image/png"]:
         if not session.get("collecting_images"):
             await update.message.reply_text("⚠️ Click 🖼️ Add Image first.")
@@ -302,13 +310,13 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Unsupported document type.")
 
-# ---------------- Register handlers ----------------
+# ---------------- Handlers registration ----------------
 application.add_handler(CommandHandler("start", start_handler))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
-# ---------------- Webhook ----------------
+# ---------------- Webhook endpoint ----------------
 @fastapi_app.post("/webhook")
 async def telegram_webhook(req: Request):
     try:
@@ -344,7 +352,7 @@ async def lifespan(app: FastAPI):
 
 fastapi_app.router.lifespan_context = lifespan
 
-# ---------------- Run ----------------
+# ---------------- Run directly ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:fastapi_app", host="0.0.0.0", port=PORT, log_level="info")
