@@ -6,57 +6,52 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException
 from telegram import Update, Bot, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from reportlab.pdfgen import canvas
 from PIL import Image
 from PyPDF2 import PdfReader, PdfWriter
 import pdfplumber
 from docx import Document
 
-# ----------------- CONFIG -----------------
+# ---------------- CONFIG ----------------
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # mandatory (string)
-RENDER_URL = os.getenv("RENDER_URL")  # eg: https://pdftoolkit-bot.onrender.com
-PORT = int(os.environ.get("PORT", 8000))
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # mandatory
+RENDER_URL = os.getenv("RENDER_URL")
+PORT = int(os.getenv("PORT", 8000))
 
 if not BOT_TOKEN or not CHANNEL_ID or not RENDER_URL:
-    raise SystemExit("Please set BOT_TOKEN, CHANNEL_ID and RENDER_URL in environment or .env")
+    raise SystemExit("Please set BOT_TOKEN, CHANNEL_ID and RENDER_URL in the environment (.env).")
 
 try:
     CHANNEL_ID = int(CHANNEL_ID)
-except Exception as e:
+except:
     raise SystemExit("CHANNEL_ID must be an integer (channel chat id), e.g. -1001234567890")
 
-# ----------------- Logging -----------------
+# ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ----------------- App & Telegram objects (constructed, not started) -----------------
+# ---------------- FastAPI + Telegram objects ----------------
 fastapi_app = FastAPI()
 bot = Bot(token=BOT_TOKEN)
 application = Application.builder().token(BOT_TOKEN).build()
 
-# ----------------- Session store (in-memory) -----------------
+# ---------------- In-memory sessions ----------------
+# simple per-user session to collect files/images before creating PDFs
 user_sessions = {}
 def ensure_user_session(user_id: int):
     s = user_sessions.setdefault(user_id, {})
-    s.setdefault("images", [])
-    s.setdefault("pdfs", [])
+    s.setdefault("images", [])       # list of file_ids (photo/document)
+    s.setdefault("pdfs", [])         # list of pdf file_ids
     s.setdefault("collecting_images", False)
     s.setdefault("collecting_pdfs", False)
     return s
 
-# ----------------- Helpers -----------------
+# ---------------- Helpers ----------------
 async def download_file(bot_obj: Bot, file_id: str, dest_path: str):
-    f = await bot_obj.get_file(file_id)
-    await f.download_to_drive(dest_path)
+    file = await bot_obj.get_file(file_id)
+    await file.download_to_drive(dest_path)
 
 def images_to_pdf_reportlab(image_paths, pdf_path):
     c = canvas.Canvas(pdf_path)
@@ -77,24 +72,38 @@ def merge_pdfs(paths, output_path):
     with open(output_path, "wb") as f:
         writer.write(f)
 
+def split_pdf(input_path, page_ranges, output_dir):
+    # page_ranges: list of (start, end) 1-based inclusive
+    out_files = []
+    reader = PdfReader(input_path)
+    for idx, (s, e) in enumerate(page_ranges, start=1):
+        writer = PdfWriter()
+        for p in range(s-1, min(e, len(reader.pages))):
+            writer.add_page(reader.pages[p])
+        out_path = os.path.join(output_dir, f"split_{idx}.pdf")
+        with open(out_path, "wb") as out_f:
+            writer.write(out_f)
+        out_files.append(out_path)
+    return out_files
+
 def extract_text_from_pdf(path):
     text = ""
     with pdfplumber.open(path) as pdf:
         for page in pdf.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
+            ptext = page.extract_text()
+            if ptext:
+                text += ptext + "\n"
     return text
 
 def pdf_to_word(pdf_path, output_path):
     text = extract_text_from_pdf(pdf_path)
     doc = Document()
-    for para in text.split("\n"):
-        if para.strip():
-            doc.add_paragraph(para)
+    for line in text.split("\n"):
+        if line.strip():
+            doc.add_paragraph(line)
     doc.save(output_path)
 
-# ----------------- Keyboard -----------------
+# ---------------- Keyboard ----------------
 MAIN_BUTTONS = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton("🖼️ Add Image"), KeyboardButton("📄 Create PDF")],
@@ -107,10 +116,10 @@ MAIN_BUTTONS = ReplyKeyboardMarkup(
     one_time_keyboard=False
 )
 
-# ----------------- Handlers -----------------
+# ---------------- Handlers ----------------
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user_session(update.effective_user.id)
-    await update.message.reply_text("👋 Welcome to PDFTools bot.\nUse the buttons below to interact.", reply_markup=MAIN_BUTTONS)
+    await update.message.reply_text("👋 Welcome to PDF Tools bot.\nUse the keyboard below.", reply_markup=MAIN_BUTTONS)
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -125,12 +134,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🖼️ Add Image":
         session["collecting_images"] = True
         session["images"] = []
-        await update.message.reply_text("📸 Send images now.")
+        await update.message.reply_text("📸 Send images now (as photos or image files).")
         return
 
     if text == "📄 Create PDF":
         if not session.get("images"):
-            await update.message.reply_text("⚠️ No images. Press 🖼️ Add Image first.")
+            await update.message.reply_text("⚠️ No images. Click 🖼️ Add Image first.")
             return
         await update.message.reply_text("⏳ Creating PDF...")
         tmp_dir = tempfile.mkdtemp()
@@ -142,11 +151,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 paths.append(local_path)
             output_pdf = os.path.join(tmp_dir, "output.pdf")
             images_to_pdf_reportlab(paths, output_pdf)
+            # send to user
             with open(output_pdf, "rb") as f:
                 await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
-            # optionally store on channel too
+            # also upload to CHANNEL to persist file_id
             with open(output_pdf, "rb") as f2:
-                await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
+                msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
+            # store pdf file_id in session (last uploaded to channel)
+            session["pdfs"] = [msg.document.file_id]
             session["images"] = []
             session["collecting_images"] = False
         finally:
@@ -158,37 +170,102 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📁 Send PDF file now.")
         return
 
-    if text == "🔍 Extract Text":
+    if text == "🔗 Merge PDFs":
+        if not session.get("pdfs"):
+            await update.message.reply_text("⚠️ No PDFs stored in session. Send PDFs first (📥 Add PDF).")
+            return
+        await update.message.reply_text("⏳ Merging PDFs...")
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            local_paths = []
+            for idx, fid in enumerate(session["pdfs"], start=1):
+                lp = os.path.join(tmp_dir, f"{idx}.pdf")
+                await download_file(context.bot, fid, lp)
+                local_paths.append(lp)
+            outp = os.path.join(tmp_dir, "merged.pdf")
+            merge_pdfs(local_paths, outp)
+            with open(outp, "rb") as f:
+                await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+            # store merged on channel
+            with open(outp, "rb") as f2:
+                msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
+            session["pdfs"] = [msg.document.file_id]
+        finally:
+            shutil.rmtree(tmp_dir)
+        return
+
+    if text == "✂️ Split PDF" or text == "✂️ Split PDF":
         if not session.get("pdfs"):
             await update.message.reply_text("⚠️ No PDF in session. Send one first (📥 Add PDF).")
+            return
+        await update.message.reply_text("📌 To split, reply in format: start-end (e.g. 1-3) or multiple like 1-2,3-4")
+        # Next message handling not implemented as complex parser — basic flow: user sends ranges in next message
+        session["awaiting_split_ranges"] = True
+        return
+
+    if session.get("awaiting_split_ranges") and text and "-" in text:
+        session.pop("awaiting_split_ranges", None)
+        ranges = []
+        try:
+            parts = [p.strip() for p in text.split(",")]
+            for part in parts:
+                s,e = part.split("-")
+                ranges.append((int(s), int(e)))
+        except Exception as e:
+            await update.message.reply_text("⚠️ Invalid format. Use like: 1-2 or 1-2,3-4")
+            return
+        await update.message.reply_text("⏳ Splitting PDF...")
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            pdf_fid = session["pdfs"][-1]
+            local_pdf = os.path.join(tmp_dir, "in.pdf")
+            await download_file(context.bot, pdf_fid, local_pdf)
+            outs = split_pdf(local_pdf, ranges, tmp_dir)
+            for outp in outs:
+                with open(outp, "rb") as f:
+                    await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
+            # optionally upload all to channel and update session
+            uploaded = []
+            for outp in outs:
+                with open(outp, "rb") as f2:
+                    m = await context.bot.send_document(chat_id=CHANNEL_ID, document=f2)
+                    uploaded.append(m.document.file_id)
+            session["pdfs"] = uploaded
+        finally:
+            shutil.rmtree(tmp_dir)
+        return
+
+    if text == "🔍 Extract Text":
+        if not session.get("pdfs"):
+            await update.message.reply_text("⚠️ No PDF in session. Send one first.")
             return
         await update.message.reply_text("⏳ Extracting text...")
         tmp_dir = tempfile.mkdtemp()
         try:
-            pdf_file_id = session["pdfs"][-1]
+            pdf_fid = session["pdfs"][-1]
             local_pdf = os.path.join(tmp_dir, "in.pdf")
-            await download_file(context.bot, pdf_file_id, local_pdf)
-            text = extract_text_from_pdf(local_pdf)
-            if not text.strip():
-                await update.message.reply_text("⚠️ No text found in PDF.")
+            await download_file(context.bot, pdf_fid, local_pdf)
+            t = extract_text_from_pdf(local_pdf)
+            if not t.strip():
+                await update.message.reply_text("⚠️ No extractable text found.")
             else:
-                for chunk_start in range(0, len(text), 4000):
-                    await update.message.reply_text(text[chunk_start:chunk_start+4000])
+                for i in range(0, len(t), 4000):
+                    await update.message.reply_text(t[i:i+4000])
         finally:
             shutil.rmtree(tmp_dir)
         return
 
     if text == "📝 PDF → Word":
         if not session.get("pdfs"):
-            await update.message.reply_text("⚠️ No PDF in session. Send one first (📥 Add PDF).")
+            await update.message.reply_text("⚠️ No PDF in session. Send one first.")
             return
         await update.message.reply_text("⏳ Converting to Word...")
         tmp_dir = tempfile.mkdtemp()
         try:
-            pdf_file_id = session["pdfs"][-1]
+            pdf_fid = session["pdfs"][-1]
             local_pdf = os.path.join(tmp_dir, "in.pdf")
             out_docx = os.path.join(tmp_dir, "out.docx")
-            await download_file(context.bot, pdf_file_id, local_pdf)
+            await download_file(context.bot, pdf_fid, local_pdf)
             pdf_to_word(local_pdf, out_docx)
             with open(out_docx, "rb") as f:
                 await context.bot.send_document(chat_id=update.effective_chat.id, document=f)
@@ -196,6 +273,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(tmp_dir)
         return
 
+    # fallback
     await update.message.reply_text("Use the keyboard buttons or /start.", reply_markup=MAIN_BUTTONS)
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -205,7 +283,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Click 🖼️ Add Image first.")
         return
     photo = update.message.photo[-1]
-    # store via channel to keep file available longer
+    # upload to channel to preserve file long-term and get canonical file_id
     msg = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo.file_id)
     session.setdefault("images", []).append(msg.photo[-1].file_id)
     await update.message.reply_text("✅ Image saved. Send more or press 📄 Create PDF.")
@@ -216,13 +294,17 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     if not doc:
         return
-    mt = doc.mime_type or ""
+    mt = (doc.mime_type or "").lower()
     if mt == "application/pdf":
+        # save on channel and store file_id
         msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=doc.file_id)
         session["pdfs"] = [msg.document.file_id]
         session["collecting_pdfs"] = False
-        await update.message.reply_text("✅ PDF saved!")
+        await update.message.reply_text("✅ PDF saved to session.")
     elif mt in ["image/jpeg", "image/png"]:
+        if not session.get("collecting_images"):
+            await update.message.reply_text("⚠️ Click 🖼️ Add Image first.")
+            return
         msg = await context.bot.send_document(chat_id=CHANNEL_ID, document=doc.file_id)
         session.setdefault("images", []).append(msg.document.file_id)
         await update.message.reply_text("✅ Image saved. Send more or press 📄 Create PDF.")
@@ -235,13 +317,16 @@ application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_han
 application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 application.add_handler(MessageHandler(filters.Document.ALL, document_handler))
 
-# ----------------- Webhook endpoint -----------------
+# ---------------- Webhook endpoint ----------------
 @fastapi_app.post("/webhook")
 async def telegram_webhook(req: Request):
-    data = await req.json()
+    try:
+        data = await req.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
     logger.info("Received update: %s", data.get("update_id"))
     update = Update.de_json(data, bot)
-    # push update for processing by PTB application
+    # push to PTB queue for processing
     await application.update_queue.put(update)
     return {"ok": True}
 
@@ -249,15 +334,19 @@ async def telegram_webhook(req: Request):
 async def root():
     return {"status": "Bot is running"}
 
-# ----------------- Lifespan (preferred over on_event) -----------------
+# ---------------- Lifespan (initialize/start/stop properly) ----------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     webhook_url = f"{RENDER_URL.rstrip('/')}/webhook"
+
+    # initialize bot properly (so bot properties like username can be accessed)
+    await bot.initialize()
+
     # set webhook
     await bot.set_webhook(webhook_url)
     logger.info("Webhook set to %s", webhook_url)
 
-    # initialize and start application so it processes update_queue
+    # initialize & start PTB Application
     await application.initialize()
     await application.start()
     logger.info("Telegram Application initialized and started.")
@@ -265,14 +354,16 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        # stop and shutdown application cleanly
+        # graceful shutdown
         await application.stop()
         await application.shutdown()
+        # close bot session
+        await bot.close()
         logger.info("Telegram Application stopped.")
 
 fastapi_app.router.lifespan_context = lifespan
 
-# ----------------- Run (only when running main.py directly) -----------------
+# ---------------- Run directly ----------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:fastapi_app", host="0.0.0.0", port=PORT, log_level="info")
