@@ -62,25 +62,32 @@ def images_to_pdf_reportlab(image_paths, pdf_path):
         c.showPage()
     c.save()
 
+# ---------------- MERGE PDF FIX ----------------
 def merge_pdfs(paths, output_path):
+    if not paths or len(paths) == 0:
+        raise ValueError("No PDF files to merge.")
     writer = PdfWriter()
     for p in paths:
         reader = PdfReader(p)
         for page in reader.pages:
             writer.add_page(page)
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "wb") as f:
         writer.write(f)
 
-def split_pdf(input_path, page_ranges, output_dir):
-    out_files = []
+# ---------------- SPLIT PDF FIX ----------------
+def split_pdf(input_path, output_dir):
+    """
+    Split a PDF into single-page PDFs automatically.
+    """
     reader = PdfReader(input_path)
-    for idx, (s, e) in enumerate(page_ranges, start=1):
+    out_files = []
+    for i, page in enumerate(reader.pages, start=1):
         writer = PdfWriter()
-        for p in range(s-1, min(e, len(reader.pages))):
-            writer.add_page(reader.pages[p])
-        out_path = os.path.join(output_dir, f"split_{idx}.pdf")
-        with open(out_path, "wb") as out_f:
-            writer.write(out_f)
+        writer.add_page(page)
+        out_path = os.path.join(output_dir, f"page_{i}.pdf")
+        with open(out_path, "wb") as f:
+            writer.write(f)
         out_files.append(out_path)
     return out_files
 
@@ -165,6 +172,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📁 Send PDF file now.")
         return
 
+    # ---------------- MERGE PDF HANDLER ----------------
     if text == "🔗 Merge PDFs":
         if not session.get("pdfs"):
             await update.message.reply_text("⚠️ No PDFs stored in session. Send PDFs first (📥 Add PDF).")
@@ -188,42 +196,18 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(tmp_dir)
         return
 
+    # ---------------- SPLIT PDF HANDLER ----------------
     if text == "✂️ Split PDF":
         if not session.get("pdfs"):
             await update.message.reply_text("⚠️ No PDF in session. Send one first (📥 Add PDF).")
             return
-        await update.message.reply_text("📌 To split, reply in format: start-end (e.g. 1-3) or multiple like 1-2,3-4")
-        session["awaiting_split_ranges"] = True
-        return
-
-    if session.get("awaiting_split_ranges") and text and "-" in text:
-        session.pop("awaiting_split_ranges", None)
-        ranges = []
-        try:
-            parts = [p.strip() for p in text.split(",")]
-            for part in parts:
-                if "-" not in part:
-                    continue
-                s, e = part.split("-")
-                s, e = int(s), int(e)
-                if s > e:
-                    s, e = e, s
-                ranges.append((s, e))
-        except Exception:
-            await update.message.reply_text("⚠️ Invalid format. Use like: 1-2 or 1-2,3-4")
-            return
-
-        if not session.get("pdfs"):
-            await update.message.reply_text("⚠️ No PDF in session. Send one first (📥 Add PDF).")
-            return
-
-        await update.message.reply_text("⏳ Splitting PDF...")
+        await update.message.reply_text("⏳ Splitting PDF into single-page PDFs...")
         tmp_dir = tempfile.mkdtemp()
         try:
             pdf_fid = session["pdfs"][-1]
             local_pdf = os.path.join(tmp_dir, "in.pdf")
             await download_file(context.bot, pdf_fid, local_pdf)
-            outs = split_pdf(local_pdf, ranges, tmp_dir)
+            outs = split_pdf(local_pdf, tmp_dir)
             uploaded = []
             for outp in outs:
                 with open(outp, "rb") as f:
